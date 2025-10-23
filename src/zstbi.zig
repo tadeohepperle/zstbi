@@ -45,6 +45,11 @@ pub const ImageWriteError = error{
     CouldNotWriteImage,
 };
 
+pub const ImageLoadOptions = struct {
+    hdr_convert_to_f16: bool = false,
+    forced_num_components: u32 = 0,
+};
+
 pub const Image = struct {
     data: []u8,
     width: u32,
@@ -74,7 +79,7 @@ pub const Image = struct {
         };
     }
 
-    pub fn loadFromFile(pathname: [:0]const u8, forced_num_components: u32) !Image {
+    pub fn loadFromFile(pathname: [:0]const u8, opts: ImageLoadOptions) !Image {
         assert(mem_allocator != null);
 
         var width: u32 = 0;
@@ -83,6 +88,7 @@ pub const Image = struct {
         var bytes_per_component: u32 = 0;
         var bytes_per_row: u32 = 0;
         var is_hdr = false;
+        const forced_num_components: u32 = opts.forced_num_components;
 
         const data = if (isHdr(pathname)) data: {
             var x: c_int = undefined;
@@ -100,18 +106,22 @@ pub const Image = struct {
             num_components = if (forced_num_components == 0) @as(u32, @intCast(ch)) else forced_num_components;
             width = @as(u32, @intCast(x));
             height = @as(u32, @intCast(y));
-            bytes_per_component = 2;
-            bytes_per_row = width * num_components * bytes_per_component;
             is_hdr = true;
+            bytes_per_component = if (opts.hdr_convert_to_f16) 2 else 4;
+            bytes_per_row = width * num_components * bytes_per_component;
 
-            // Convert each component from f32 to f16.
-            var ptr_f16 = @as([*]f16, @ptrCast(ptr.?));
-            const num = width * height * num_components;
-            var i: u32 = 0;
-            while (i < num) : (i += 1) {
-                ptr_f16[i] = @as(f16, @floatCast(ptr.?[i]));
+            if (opts.hdr_convert_to_f16) {
+                // Convert each component from f32 to f16.
+                var ptr_f16 = @as([*]f16, @ptrCast(ptr.?));
+                const num = width * height * num_components;
+                var i: u32 = 0;
+                while (i < num) : (i += 1) {
+                    ptr_f16[i] = @as(f16, @floatCast(ptr.?[i]));
+                }
+                break :data @as([*]u8, @ptrCast(ptr_f16))[0 .. height * bytes_per_row];
+            } else {
+                break :data @as([*]u8, @ptrCast(ptr.?))[0 .. height * bytes_per_row];
             }
-            break :data @as([*]u8, @ptrCast(ptr_f16))[0 .. height * bytes_per_row];
         } else data: {
             var x: c_int = undefined;
             var y: c_int = undefined;
@@ -428,7 +438,7 @@ fn zstbiRealloc(ptr: ?*anyopaque, size: usize) callconv(.c) ?*anyopaque {
 extern var zstbiFreePtr: ?*const fn (maybe_ptr: ?*anyopaque) callconv(.c) void;
 extern var zstbiwFreePtr: ?*const fn (maybe_ptr: ?*anyopaque) callconv(.c) void;
 
-fn zstbiFree(maybe_ptr: ?*anyopaque) callconv(.c) void {
+pub fn zstbiFree(maybe_ptr: ?*anyopaque) callconv(.c) void {
     if (maybe_ptr) |ptr| {
         mem_mutex.lock();
         defer mem_mutex.unlock();
@@ -453,7 +463,7 @@ fn zstbirFree(maybe_ptr: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
 
 extern fn stbi_info(filename: [*:0]const u8, x: *c_int, y: *c_int, comp: *c_int) c_int;
 
-extern fn stbi_load(
+pub extern fn stbi_load(
     filename: [*:0]const u8,
     x: *c_int,
     y: *c_int,
@@ -461,7 +471,7 @@ extern fn stbi_load(
     desired_channels: c_int,
 ) ?[*]u8;
 
-extern fn stbi_load_16(
+pub extern fn stbi_load_16(
     filename: [*:0]const u8,
     x: *c_int,
     y: *c_int,
@@ -469,7 +479,7 @@ extern fn stbi_load_16(
     desired_channels: c_int,
 ) ?[*]u16;
 
-extern fn stbi_loadf(
+pub extern fn stbi_loadf(
     filename: [*:0]const u8,
     x: *c_int,
     y: *c_int,
@@ -600,14 +610,14 @@ test "zstbi write and load file" {
     try img.writeToFile("test_img.png", ImageWriteFormat.png);
     try img.writeToFile("test_img.jpg", .{ .jpg = .{ .quality = 80 } });
 
-    var img_png = try Image.loadFromFile("test_img.png", 0);
+    var img_png = try Image.loadFromFile("test_img.png", .{});
     defer img_png.deinit();
 
     try testing.expect(img_png.width == img.width);
     try testing.expect(img_png.height == img.height);
     try testing.expect(img_png.num_components == img.num_components);
 
-    var img_jpg = try Image.loadFromFile("test_img.jpg", 0);
+    var img_jpg = try Image.loadFromFile("test_img.jpg", .{});
     defer img_jpg.deinit();
 
     try testing.expect(img_jpg.width == img.width);
